@@ -1,0 +1,16 @@
+services:
+  gutenberg-sync:
+    build: .
+    container_name: gutenberg-sync
+    user: "1003:1003"
+    restart: unless-stopped
+    stop_signal: SIGTERM
+    stop_grace_period: 30s
+    volumes:
+      - /path/to/ebooks/gutenberg:/gutenberg
+      - /path/to/gutenberg-sync/db:/db
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
