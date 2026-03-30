@@ -68,8 +68,6 @@ while true; do
     # Write as tab-separated values and bulk-import (avoids SQL injection entirely)
     echo "$NEW_FILES" > /tmp/new_files.txt
     sqlite3 "$DB" <<EOF
-.mode csv
-.separator "\n"
 CREATE TEMP TABLE _import (filename TEXT);
 .import /tmp/new_files.txt _import
 INSERT OR IGNORE INTO synced_books (filename)
