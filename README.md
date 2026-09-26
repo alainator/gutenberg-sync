@@ -1,13 +1,16 @@
 # gutenberg-sync
 
-Automatically mirrors Project Gutenberg's EPUB catalog via rsync and tracks sync state in a local SQLite database. Designed to run as a Docker container on a home server.
+Automatically mirrors Project Gutenberg's EPUB catalog via rsync and tracks sync state in a local SQLite database. Designed to run as a Docker container on a home server, feeding an ingest folder (e.g. a library manager's).
 
 ## What it does
 
-- Syncs `*-images-3.epub` files from `aleph.gutenberg.org::gutenberg-epub` (the illustrated EPUB variant)
-- Tracks already-synced filenames in SQLite so subsequent runs skip them entirely
+- Syncs `*-images-3.epub` files (the illustrated EPUB variant) from `aleph.gutenberg.org::gutenberg-epub`
+- Downloads each filename once: synced filenames are tracked in SQLite, and files deleted from `raw/` (e.g. after ingestion) are never re-downloaded
+- Lists the mirror, diffs against the DB locally, and fetches only new files via `--files-from`
+- Downloads into `staging/`, records each completed file in the DB, then moves it into `raw/`, so a consumer can take files at any time without causing re-downloads
+- Writes files flat into `raw/` (`raw/pg123-images-3.epub`)
 - Runs on a 24-hour cycle by default
-- Handles rsync failures gracefully and shuts down cleanly on `docker stop`
+- Handles rsync failures (completed files are always recorded; hard failures retry after 5 minutes) and shuts down cleanly on `docker stop`, even mid-transfer
 
 ## Setup
 
@@ -19,17 +22,19 @@ git clone https://github.com/YOUR_USERNAME/gutenberg-sync.git
 
 Edit `docker-compose.yml` to set your volume paths:
 
-- `/path/to/ebooks/gutenberg` — where the downloaded EPUBs will be stored
-- `/path/to/gutenberg-sync/db` — where the SQLite database will live
+- `/path/to/ebooks/gutenberg` → `/gutenberg`: holds `raw/` (finished EPUBs) and `staging/` (in-progress downloads)
+- `/path/to/gutenberg-sync/db` → `/db`: the SQLite database
+
+`staging/` and `raw/` must be on the same mount so the handoff is an atomic rename. Mount the parent `gutenberg/` directory rather than `raw/` alone; the script refuses to start otherwise.
 
 ### 2. Set directory ownership
 
 The container runs as UID/GID `1003:1003` by default. Match this on the host:
 
 ```bash
-sudo mkdir -p /path/to/ebooks/gutenberg/raw
+sudo mkdir -p /path/to/ebooks/gutenberg/{raw,staging}
 sudo mkdir -p /path/to/gutenberg-sync/db
-sudo chown 1003:1003 /path/to/ebooks/gutenberg/raw
+sudo chown 1003:1003 /path/to/ebooks/gutenberg/{raw,staging}
 sudo chown 1003:1003 /path/to/gutenberg-sync/db
 ```
 
@@ -48,7 +53,7 @@ docker compose up -d gutenberg-sync
 docker logs -f gutenberg-sync
 ```
 
-The first sync will take a while — rsync needs to scan the full Gutenberg mirror before files start downloading.
+The first sync takes a long time: at 500 KB/s a full backfill runs for days. Files appear in `raw/` once each fetch finishes, not as they download. If the fetch is interrupted, whatever completed is recorded and moved into `raw/` on the next start.
 
 ## Useful commands
 
@@ -60,17 +65,32 @@ docker exec gutenberg-sync sqlite3 /db/sync_state.db "SELECT COUNT(*) FROM synce
 docker exec gutenberg-sync sqlite3 /db/sync_state.db \
   "SELECT filename, synced_at FROM synced_books ORDER BY synced_at DESC LIMIT 10;"
 
+# Force a book to be downloaded again on the next cycle
+docker exec gutenberg-sync sqlite3 /db/sync_state.db \
+  "DELETE FROM synced_books WHERE filename = 'pg1342-images-3.epub';"
+
 # Trigger an immediate sync
 docker restart gutenberg-sync
 ```
 
 ## Configuration
 
+Set these under `environment:` in `docker-compose.yml`:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SYNC_INTERVAL` | `86400` (24h) | Seconds between sync cycles |
+| `RETRY_INTERVAL` | `300` | Seconds before retrying after a failed listing or fetch |
+| `BWLIMIT` | `500` | rsync bandwidth limit in KB/s |
+| `RAW` | `/gutenberg/raw` | Where finished EPUBs are handed off |
+| `STAGE` | `/gutenberg/staging` | Download area; must be on the same mount as `RAW` |
+| `DB` | `/db/sync_state.db` | SQLite database path |
+
+Other settings:
+
 | Setting | Location | Default |
 |---|---|---|
-| Sync interval | `SYNC_INTERVAL` in `sync.sh` | `86400` (24h) |
-| Bandwidth limit | `--bwlimit` in `sync.sh` | `500` KB/s |
-| EPUB variant | `--include` pattern in `sync.sh` | `*-images-3.epub` |
+| EPUB variant | `*-images-3.epub` pattern in `sync.sh` (3 places) | `*-images-3.epub` |
 | Container UID/GID | `user:` in `docker-compose.yml` | `1003:1003` |
 
 ## File structure
